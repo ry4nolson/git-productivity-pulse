@@ -3,6 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "license": "MIT",
   "description": "Visualize a GitHub author's weekly commit & lines-of-code output over time — built to reveal the AI-era productivity inflection.",
   "scripts": {
     "dev": "vite",
