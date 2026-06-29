@@ -4,6 +4,8 @@ A reusable dashboard that visualizes **any GitHub author's weekly output** — c
 
 The timeline is split at an adjustable "AI adoption" marker so the before/after is obvious at a glance.
 
+**▶ Live: <https://ry4nolson.github.io/git-productivity-pulse/>** — bring a GitHub token (or wire up OAuth) and your data never leaves your browser.
+
 ![stack](https://img.shields.io/badge/Vite-React-blue) ![charts](https://img.shields.io/badge/Recharts-purple)
 
 ## How it works
