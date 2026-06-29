@@ -1,0 +1,11 @@
+name = "gpp-oauth"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Set this to your deployed app's origin (no trailing slash). Use "*" only for local dev.
+[vars]
+ALLOWED_ORIGIN = "http://localhost:5175"
+
+# Secrets (do NOT put these here — set them with wrangler):
+#   npx wrangler secret put GITHUB_CLIENT_ID
+#   npx wrangler secret put GITHUB_CLIENT_SECRET
