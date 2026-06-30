@@ -262,6 +262,16 @@ function Dashboard({
           >
             Load JSON
           </button>
+          <button
+            onClick={() => {
+              [LS_TOKEN, LS_DATA, LS_CFG].forEach((k) => localStorage.removeItem(k));
+              sessionStorage.removeItem('gpp:oauth_state');
+              window.location.reload();
+            }}
+            className="rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-white/50 transition hover:border-neg hover:text-neg"
+          >
+            Sign out
+          </button>
         </div>
         <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={onUpload} />
       </header>
