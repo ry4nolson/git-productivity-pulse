@@ -28,6 +28,12 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+        env:
+          # Set these as repo *Variables* (Settings → Secrets and variables →
+          # Actions → Variables) to enable "Sign in with GitHub". Both are
+          # public values, not secrets. Leave unset to fall back to the PAT flow.
+          VITE_GITHUB_CLIENT_ID: ${{ vars.VITE_GITHUB_CLIENT_ID }}
+          VITE_OAUTH_PROXY_URL: ${{ vars.VITE_OAUTH_PROXY_URL }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

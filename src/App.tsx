@@ -529,21 +529,29 @@ function elapsed(ms: number): string {
 const inputCls =
   'mt-1 w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-accent';
 
-function OrgMultiSelect({
-  orgs,
+interface ScopeItem {
+  id: string;
+  label: string;
+  avatarUrl: string;
+  hint?: string;
+}
+
+function ScopeMultiSelect({
+  items,
   selected,
   onToggle,
   onAdd,
 }: {
-  orgs: GhOrg[];
+  items: ScopeItem[];
   selected: Set<string>;
-  onToggle: (login: string) => void;
+  onToggle: (id: string) => void;
   onAdd: (login: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
-  const filtered = orgs.filter((o) => o.login.toLowerCase().includes(q.trim().toLowerCase()));
-  const canAdd = q.trim() && !orgs.some((o) => o.login.toLowerCase() === q.trim().toLowerCase());
+  const filtered = items.filter((o) => o.label.toLowerCase().includes(q.trim().toLowerCase()));
+  const canAdd = q.trim() && !items.some((o) => o.label.toLowerCase() === q.trim().toLowerCase());
+  const labelFor = (id: string) => items.find((o) => o.id === id)?.label ?? id;
 
   return (
     <div className="relative">
@@ -553,7 +561,7 @@ function OrgMultiSelect({
         className="flex w-full items-center justify-between rounded-lg border border-line bg-ink px-3 py-2 text-sm text-white outline-none focus:border-accent"
       >
         <span className={selected.size ? 'text-white' : 'text-white/30'}>
-          {selected.size ? `${selected.size} organization${selected.size > 1 ? 's' : ''} selected` : 'Select organizations…'}
+          {selected.size ? `${selected.size} selected` : 'Select organizations / accounts…'}
         </span>
         <span className="text-white/40">▾</span>
       </button>
@@ -569,14 +577,15 @@ function OrgMultiSelect({
               className="mb-1 w-full rounded-md border border-line bg-ink px-2.5 py-1.5 text-sm text-white outline-none placeholder:text-white/25 focus:border-accent"
             />
             {filtered.map((o) => (
-              <label key={o.login} className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-sm text-white/80 hover:bg-white/5">
-                <input type="checkbox" checked={selected.has(o.login)} onChange={() => onToggle(o.login)} className="accent-[var(--color-accent)]" />
+              <label key={o.id} className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-sm text-white/80 hover:bg-white/5">
+                <input type="checkbox" checked={selected.has(o.id)} onChange={() => onToggle(o.id)} className="accent-[var(--color-accent)]" />
                 {o.avatarUrl ? (
                   <img src={o.avatarUrl} alt="" className="h-5 w-5 rounded" />
                 ) : (
-                  <span className="grid h-5 w-5 place-items-center rounded bg-white/10 text-[10px]">{o.login[0]?.toUpperCase()}</span>
+                  <span className="grid h-5 w-5 place-items-center rounded bg-white/10 text-[10px]">{o.label[0]?.toUpperCase()}</span>
                 )}
-                <span className="truncate">{o.login}</span>
+                <span className="truncate">{o.label}</span>
+                {o.hint && <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-white/30">{o.hint}</span>}
               </label>
             ))}
             {canAdd && (
@@ -591,21 +600,21 @@ function OrgMultiSelect({
                 + Add “{q.trim()}”
               </button>
             )}
-            {filtered.length === 0 && !canAdd && <p className="px-2 py-2 text-sm text-white/40">No organizations.</p>}
+            {filtered.length === 0 && !canAdd && <p className="px-2 py-2 text-sm text-white/40">No matches.</p>}
           </div>
         </>
       )}
 
       {selected.size > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {[...selected].map((s) => (
+          {[...selected].map((id) => (
             <button
-              key={s}
+              key={id}
               type="button"
-              onClick={() => onToggle(s)}
+              onClick={() => onToggle(id)}
               className="inline-flex items-center gap-1 rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-xs text-accent hover:bg-accent/20"
             >
-              {s} <span className="text-accent/60">✕</span>
+              {labelFor(id)} <span className="text-accent/60">✕</span>
             </button>
           ))}
         </div>
@@ -652,12 +661,17 @@ function SetupForm({
   const [since, setSince] = useState(saved.since || '2021-01-01');
   const [measureUser, setMeasureUser] = useState(saved.user || '');
 
+  const savedUsers = (saved.users || '').split(',').map((s) => s.trim()).filter(Boolean);
   const [connecting, setConnecting] = useState(false);
   const [connectErr, setConnectErr] = useState<string | null>(null);
   const [viewer, setViewer] = useState<string | null>(null);
+  const [viewerAvatar, setViewerAvatar] = useState('');
   const [orgs, setOrgs] = useState<GhOrg[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set(savedOrgs));
-  const [includePersonal, setIncludePersonal] = useState(false);
+  // selection ids are prefixed: org:<login> for orgs, user:<login> for accounts
+  const [selected, setSelected] = useState<Set<string>>(
+    new Set([...savedOrgs.map((o) => `org:${o}`), ...savedUsers.map((u) => `user:${u}`)]),
+  );
+  const [showToken, setShowToken] = useState(!oauthEnabled);
 
   async function connect(tok: string) {
     const t = tok.trim();
@@ -667,13 +681,13 @@ function SetupForm({
     try {
       const [me, myOrgs] = await Promise.all([getViewer(t), listOrgs(t)]);
       setViewer(me.login);
+      setViewerAvatar(me.avatarUrl);
       setMeasureUser((u) => u || me.login);
       // ensure any previously-used orgs that aren't in the membership list still appear
       const extra = savedOrgs
         .filter((o) => !myOrgs.some((m) => m.login === o))
         .map((login) => ({ login, avatarUrl: '' }));
       setOrgs([...myOrgs, ...extra]);
-      setIncludePersonal((saved.users || '').split(',').map((s) => s.trim()).includes(me.login));
     } catch (e: any) {
       setConnectErr(e?.message || String(e));
       setViewer(null);
@@ -694,28 +708,34 @@ function SetupForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [oauthToken]);
 
-  function toggleOrg(login: string) {
+  function toggle(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
-      next.has(login) ? next.delete(login) : next.add(login);
+      next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
   }
   function addOrg(login: string) {
     setOrgs((prev) => (prev.some((o) => o.login === login) ? prev : [...prev, { login, avatarUrl: '' }]));
-    setSelected((prev) => new Set(prev).add(login));
+    setSelected((prev) => new Set(prev).add(`org:${login}`));
   }
 
-  const valid = viewer && measureUser.trim() && (selected.size > 0 || includePersonal);
+  const scopeItems: ScopeItem[] = [
+    ...(viewer ? [{ id: `user:${viewer}`, label: viewer, avatarUrl: viewerAvatar, hint: 'you' }] : []),
+    ...orgs.map((o) => ({ id: `org:${o.login}`, label: o.login, avatarUrl: o.avatarUrl })),
+  ];
+
+  const valid = viewer && measureUser.trim() && selected.size > 0;
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!valid) return;
+    const ids = [...selected];
     onRun(
       {
         user: measureUser.trim(),
-        orgs: [...selected],
-        users: includePersonal ? [measureUser.trim()] : [],
+        orgs: ids.filter((s) => s.startsWith('org:')).map((s) => s.slice(4)),
+        users: ids.filter((s) => s.startsWith('user:')).map((s) => s.slice(5)),
         since: since || undefined,
         token: token.trim(),
       },
@@ -744,55 +764,67 @@ function SetupForm({
               type="button"
               onClick={onSignIn}
               disabled={oauthBusy}
-              className="flex items-center justify-center gap-2 rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-black transition hover:brightness-90 disabled:opacity-50"
+              className="flex items-center justify-center gap-2 rounded-lg bg-white px-4 py-3 text-sm font-semibold text-black transition hover:brightness-90 disabled:opacity-50"
             >
               <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
                 <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
               </svg>
-              {oauthBusy ? 'Signing in…' : 'Sign in with GitHub'}
+              {oauthBusy ? 'Signing in…' : viewer ? `Signed in as ${viewer}` : 'Sign in with GitHub'}
             </button>
-            <div className="flex items-center gap-3 text-[11px] uppercase tracking-wider text-white/25">
-              <span className="h-px flex-1 bg-line" /> or use a token <span className="h-px flex-1 bg-line" />
-            </div>
+            <p className="-mt-1 text-center text-[11px] text-white/30">
+              Authorize once — no token to create or paste.
+            </p>
+            {!showToken && !viewer && (
+              <button type="button" onClick={() => setShowToken(true)} className="text-center text-[11px] text-white/35 hover:text-white">
+                Advanced: use a personal access token instead
+              </button>
+            )}
           </>
         )}
 
-        {/* token + connect */}
-        <div>
-          <label className="text-xs font-medium uppercase tracking-wider text-white/45">Personal access token</label>
-          <div className="mt-1 flex gap-2">
-            <input
-              type="password"
-              className="w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-accent"
-              value={token}
-              onChange={(e) => {
-                setToken(e.target.value);
-                setViewer(null);
-              }}
-              onBlur={() => !viewer && token.trim() && connect(token)}
-              placeholder="ghp_…"
-              autoComplete="off"
-            />
-            <button
-              type="button"
-              onClick={() => connect(token)}
-              disabled={!token.trim() || connecting}
-              className="shrink-0 rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-white/80 transition hover:border-accent disabled:opacity-40"
-            >
-              {connecting ? 'Connecting…' : viewer ? 'Reconnect' : 'Connect'}
-            </button>
-          </div>
-          <div className="mt-1.5 flex items-center justify-between text-[11px] text-white/40">
-            {viewer ? (
-              <span className="text-pos">✓ Connected as {viewer}</span>
-            ) : (
-              <span>Needs scopes repo + read:org</span>
+        {/* token + connect (primary when OAuth isn't configured, otherwise opt-in) */}
+        {(showToken || !oauthEnabled) && (
+          <div>
+            {oauthEnabled && (
+              <div className="mb-3 flex items-center gap-3 text-[11px] uppercase tracking-wider text-white/25">
+                <span className="h-px flex-1 bg-line" /> personal access token <span className="h-px flex-1 bg-line" />
+              </div>
             )}
-            <a href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Git%20Productivity%20Pulse" target="_blank" rel="noreferrer" className="text-accent hover:underline">
-              Create a token ↗
-            </a>
+            <label className="text-xs font-medium uppercase tracking-wider text-white/45">Personal access token</label>
+            <div className="mt-1 flex gap-2">
+              <input
+                type="password"
+                className="w-full rounded-lg border border-line bg-ink px-3 py-2 text-sm text-white outline-none placeholder:text-white/25 focus:border-accent"
+                value={token}
+                onChange={(e) => {
+                  setToken(e.target.value);
+                  setViewer(null);
+                }}
+                onBlur={() => !viewer && token.trim() && connect(token)}
+                placeholder="ghp_…"
+                autoComplete="off"
+              />
+              <button
+                type="button"
+                onClick={() => connect(token)}
+                disabled={!token.trim() || connecting}
+                className="shrink-0 rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-white/80 transition hover:border-accent disabled:opacity-40"
+              >
+                {connecting ? 'Connecting…' : viewer ? 'Reconnect' : 'Connect'}
+              </button>
+            </div>
+            <div className="mt-1.5 flex items-center justify-between text-[11px] text-white/40">
+              {viewer ? (
+                <span className="text-pos">✓ Connected as {viewer}</span>
+              ) : (
+                <span>Needs scopes repo + read:org</span>
+              )}
+              <a href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Git%20Productivity%20Pulse" target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                Create a token ↗
+              </a>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* connected: configure */}
         {viewer && (
@@ -803,22 +835,19 @@ function SetupForm({
             </label>
 
             <div className="text-xs font-medium uppercase tracking-wider text-white/45">
-              Organizations
+              Organizations &amp; accounts to scan
               <div className="mt-1 font-sans normal-case">
-                <OrgMultiSelect orgs={orgs} selected={selected} onToggle={toggleOrg} onAdd={addOrg} />
+                <ScopeMultiSelect items={scopeItems} selected={selected} onToggle={toggle} onAdd={addOrg} />
               </div>
+              <p className="mt-1.5 font-sans text-[11px] normal-case text-white/30">
+                Tick your own account (<span className="text-white/50">@{viewer}</span>) to include your personal repos.
+              </p>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2 sm:items-end">
-              <label className="text-xs font-medium uppercase tracking-wider text-white/45">
-                Since
-                <input type="date" className={inputCls} value={since} onChange={(e) => setSince(e.target.value)} />
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 pb-2 text-xs text-white/55">
-                <input type="checkbox" checked={includePersonal} onChange={(e) => setIncludePersonal(e.target.checked)} className="accent-[var(--color-accent)]" />
-                Include personal repos (@{measureUser || viewer})
-              </label>
-            </div>
+            <label className="text-xs font-medium uppercase tracking-wider text-white/45">
+              Since
+              <input type="date" className={inputCls} value={since} onChange={(e) => setSince(e.target.value)} />
+            </label>
 
             <label className="flex cursor-pointer items-center gap-2 text-xs text-white/45">
               <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="accent-[var(--color-accent)]" />
@@ -872,7 +901,20 @@ function SetupForm({
 
 function ProgressView({ progress, onCancel }: { progress: CollectProgress | null; onCancel: () => void }) {
   const p = progress;
-  const pct = p && p.total > 0 ? Math.round((p.scanned / p.total) * 100) : 0;
+  // tick a local clock so the timer keeps moving even while the last repo's
+  // stats are still computing (when no progress events are firing)
+  const startRef = useRef(Date.now());
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
+  const liveMs = now - startRef.current;
+
+  const done = !!p && p.scanned >= p.total && p.total > 0;
+  const rawPct = p && p.total > 0 ? (p.scanned / p.total) * 100 : 0;
+  // floor so it never reads 100% until genuinely finished
+  const pct = done || p?.phase === 'aggregating' || p?.phase === 'done' ? 100 : Math.floor(rawPct);
   const indeterminate = !p || p.phase === 'enumerating';
   const label =
     p?.phase === 'enumerating'
@@ -890,7 +932,7 @@ function ProgressView({ progress, onCancel }: { progress: CollectProgress | null
           <div className="flex items-center gap-2 text-sm font-medium text-accent">
             <span className="glow text-xl">⚡</span> {label}
           </div>
-          <span className="tnum text-sm text-white/45">{p ? elapsed(p.elapsedMs) : '0:00'}</span>
+          <span className="tnum text-sm text-white/45">{elapsed(liveMs)}</span>
         </div>
 
         <div className="relative mt-5 h-2.5 w-full overflow-hidden rounded-full bg-white/5">

@@ -103,17 +103,19 @@ async function paginate(
   return out;
 }
 
-/** /stats/contributors returns 202 while GitHub computes; poll with backoff */
+/** /stats/contributors returns 202 while GitHub computes; poll with capped backoff */
 async function statsContributors(
   fullName: string,
   token: string,
   signal?: AbortSignal,
-  maxTries = 10,
+  onWarm?: (attempt: number) => void,
+  maxTries = 7,
 ): Promise<any[]> {
   for (let attempt = 0; attempt < maxTries; attempt++) {
     const res = await ghFetch(`/repos/${fullName}/stats/contributors`, token, signal);
     if (res.status === 202) {
-      await sleep(1500 + attempt * 1200, signal);
+      onWarm?.(attempt + 1); // surface "still computing" so the UI keeps moving
+      await sleep(Math.min(4000, 1000 + attempt * 800), signal);
       continue;
     }
     if (res.status === 204) return []; // empty repo
@@ -307,7 +309,18 @@ export async function collect(
   async function worker() {
     while (idx < repos.length) {
       const repo = repos[idx++];
-      const stats = await statsContributors(repo.full_name, cfg.token, signal);
+      const stats = await statsContributors(repo.full_name, cfg.token, signal, (attempt) =>
+        onProgress({
+          phase: 'scanning',
+          scanned,
+          total,
+          found: total,
+          contributed: contributed.length,
+          commits,
+          currentRepo: `${repo.full_name} · computing stats (try ${attempt})…`,
+          elapsedMs: Date.now() - t0,
+        }),
+      );
       const mine = stats.find((s: any) => s?.author?.login?.toLowerCase() === target);
       if (mine) {
         const weeks: RepoWeek[] = (mine.weeks || [])
@@ -326,6 +339,7 @@ export async function collect(
   await Promise.all(Array.from({ length: Math.min(concurrency, repos.length) }, worker));
 
   onProgress({ phase: 'aggregating', scanned, total, found: total, contributed: contributed.length, commits, elapsedMs: Date.now() - t0 });
+  await sleep(0, signal); // let the "Crunching…" frame paint before the synchronous build
   const dataset = buildDataset(cfg, total, contributed, t0);
   onProgress({ phase: 'done', scanned, total, found: total, contributed: contributed.length, commits: dataset.totals.commits, elapsedMs: Date.now() - t0 });
   return dataset;
