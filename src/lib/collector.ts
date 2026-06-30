@@ -103,14 +103,19 @@ async function paginate(
   return out;
 }
 
-/** /stats/contributors returns 202 while GitHub computes; poll with capped backoff */
+/**
+ * /stats/contributors returns 202 while GitHub computes the stats (the first
+ * request kicks off that computation server-side). Returns the array when
+ * ready, [] for empty/no-access, or null if still computing after maxTries —
+ * letting the caller defer and come back once GitHub has finished.
+ */
 async function statsContributors(
   fullName: string,
   token: string,
   signal?: AbortSignal,
   onWarm?: (attempt: number) => void,
   maxTries = 7,
-): Promise<any[]> {
+): Promise<any[] | null> {
   for (let attempt = 0; attempt < maxTries; attempt++) {
     const res = await ghFetch(`/repos/${fullName}/stats/contributors`, token, signal);
     if (res.status === 202) {
@@ -123,7 +128,7 @@ async function statsContributors(
     const data = await res.json();
     return Array.isArray(data) ? data : [];
   }
-  return [];
+  return null; // still computing after maxTries — defer
 }
 
 interface RepoRef {
@@ -305,42 +310,71 @@ export async function collect(
   const contributed: { repo: string; language: string; weeks: RepoWeek[] }[] = [];
   const target = cfg.user.toLowerCase();
 
+  const emitScan = (currentRepo: string) =>
+    onProgress({ phase: 'scanning', scanned, total, found: total, contributed: contributed.length, commits, currentRepo, elapsedMs: Date.now() - t0 });
+
+  const record = (repo: RepoRef, stats: any[]) => {
+    const mine = stats.find((s: any) => s?.author?.login?.toLowerCase() === target);
+    if (mine) {
+      const weeks: RepoWeek[] = (mine.weeks || [])
+        .filter((w: any) => (w.c || 0) > 0 && (sinceUnix ? w.w >= sinceUnix : true))
+        .map((w: any) => ({ w: w.w, c: w.c || 0, a: w.a || 0, d: w.d || 0 }));
+      if (weeks.length) {
+        contributed.push({ repo: repo.full_name, language: repo.language, weeks });
+        commits += weeks.reduce((acc, w) => acc + w.c, 0);
+      }
+    }
+    scanned++;
+  };
+
+  const runPool = (work: () => Promise<void>, count: number) =>
+    Promise.all(Array.from({ length: Math.max(0, Math.min(concurrency, count)) }, work));
+
+  // Pass 1 — touch every repo with a short retry. This kicks off GitHub's
+  // server-side stats computation for ALL repos in parallel; any still
+  // computing are deferred so we don't serialize on them at the tail.
+  const pending: RepoRef[] = [];
   let idx = 0;
-  async function worker() {
+  await runPool(async () => {
     while (idx < repos.length) {
       const repo = repos[idx++];
-      const stats = await statsContributors(repo.full_name, cfg.token, signal, (attempt) =>
-        onProgress({
-          phase: 'scanning',
-          scanned,
-          total,
-          found: total,
-          contributed: contributed.length,
-          commits,
-          currentRepo: `${repo.full_name} · computing stats (try ${attempt})…`,
-          elapsedMs: Date.now() - t0,
-        }),
-      );
-      const mine = stats.find((s: any) => s?.author?.login?.toLowerCase() === target);
-      if (mine) {
-        const weeks: RepoWeek[] = (mine.weeks || [])
-          .filter((w: any) => (w.c || 0) > 0 && (sinceUnix ? w.w >= sinceUnix : true))
-          .map((w: any) => ({ w: w.w, c: w.c || 0, a: w.a || 0, d: w.d || 0 }));
-        if (weeks.length) {
-          contributed.push({ repo: repo.full_name, language: repo.language, weeks });
-          commits += weeks.reduce((acc, w) => acc + w.c, 0);
-        }
+      const stats = await statsContributors(repo.full_name, cfg.token, signal, undefined, 2);
+      if (stats === null) {
+        pending.push(repo);
+        emitScan(`${repo.full_name} · GitHub is computing stats…`);
+      } else {
+        record(repo, stats);
+        emitScan(repo.full_name);
       }
-      scanned++;
-      onProgress({ phase: 'scanning', scanned, total, found: total, contributed: contributed.length, commits, currentRepo: repo.full_name, elapsedMs: Date.now() - t0 });
     }
-  }
+  }, repos.length);
 
-  await Promise.all(Array.from({ length: Math.min(concurrency, repos.length) }, worker));
+  // Pass 2 — revisit deferred repos. GitHub has been computing them during
+  // pass 1, so they're usually ready now. Bound the wait (~25s): a repo pushed
+  // seconds ago can take GitHub a minute to compute, and we won't hang the
+  // whole run on it — skip it (a re-run shortly after will include it).
+  const skipped: string[] = [];
+  let pidx = 0;
+  await runPool(async () => {
+    while (pidx < pending.length) {
+      const repo = pending[pidx++];
+      const left = pending.length - pidx + 1;
+      emitScan(`Finishing — GitHub is still computing stats for ${left} recently-pushed repo(s)…`);
+      const stats = await statsContributors(repo.full_name, cfg.token, signal, undefined, 8);
+      if (stats === null) {
+        skipped.push(repo.full_name); // still computing — skip rather than hang
+        scanned++;
+      } else {
+        record(repo, stats);
+      }
+      emitScan(repo.full_name);
+    }
+  }, pending.length);
 
   onProgress({ phase: 'aggregating', scanned, total, found: total, contributed: contributed.length, commits, elapsedMs: Date.now() - t0 });
   await sleep(0, signal); // let the "Crunching…" frame paint before the synchronous build
   const dataset = buildDataset(cfg, total, contributed, t0);
+  if (skipped.length) dataset.meta.skipped = skipped;
   onProgress({ phase: 'done', scanned, total, found: total, contributed: contributed.length, commits: dataset.totals.commits, elapsedMs: Date.now() - t0 });
   return dataset;
 }

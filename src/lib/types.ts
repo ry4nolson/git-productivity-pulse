@@ -46,6 +46,7 @@ export interface Dataset {
     reposScanned: number;
     reposContributed: number;
     collectorSeconds: number;
+    skipped?: string[]; // repos GitHub was still computing; re-run to include
   };
   totals: {
     commits: number;

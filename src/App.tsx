@@ -462,6 +462,15 @@ function Dashboard({
         <Stat label="Repos touched" value={`${view.meta.reposContributed}`} sub={isFiltered ? 'in range' : `of ${ds.meta.reposScanned} scanned`} accent="accent-2" />
       </div>
 
+      {ds.meta.skipped && ds.meta.skipped.length > 0 && (
+        <div className="card mb-6 border-amber/30 bg-amber/5 p-3 text-xs text-amber/90">
+          ⏳ {ds.meta.skipped.length} repo{ds.meta.skipped.length > 1 ? 's were' : ' was'} skipped — GitHub was
+          still computing their stats (usual for repos pushed in the last minute):{' '}
+          <span className="text-amber/70">{ds.meta.skipped.join(', ')}</span>. Run a new analysis in a minute to
+          include {ds.meta.skipped.length > 1 ? 'them' : 'it'}.
+        </div>
+      )}
+
       <footer className="mt-10 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-6 text-xs text-white/35">
         <span>
           Generated {new Date(ds.meta.generatedAt).toLocaleString()} · scanned {ds.meta.reposScanned} repos in{' '}
