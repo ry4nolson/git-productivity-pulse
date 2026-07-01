@@ -14,9 +14,13 @@ It's a **100% client-side** app — no backend required (OAuth is optional, see 
 
 1. Open the app and paste a **personal access token**, then hit **Connect**. The app calls `/user` to auto-detect your **username** and `/user/orgs` to populate an **organization dropdown** — so you just tick the orgs to scan (or add one by name), pick a **since** date, and optionally include your personal repos.
 2. The browser enumerates every repo in those orgs/users and calls GitHub's `/stats/contributors` endpoint per repo (which returns *weekly* additions/deletions/commits per author — far cheaper than walking every commit), filtering to your login. A **progress bar** tracks the scan, which can take several minutes for a large org.
-3. The aggregated dataset renders into the dashboard and is cached in `localStorage`, so a refresh is instant. Hit **⚙ New analysis** to run again for someone else.
+3. The aggregated dataset renders into the dashboard. Per-repo stats are cached for **6 hours**, so re-runs skip the network for unchanged repos and finish in a second or two (tick **Force refresh** to bypass). Hit **⚙ New analysis** to run again for someone else, or **Sign out** to wipe everything.
 
 **Optional OAuth** — configure the serverless proxy in [`oauth/`](./oauth/README.md) and set `VITE_GITHUB_CLIENT_ID` + `VITE_OAUTH_PROXY_URL` (see `.env.example`) to get a **"Sign in with GitHub"** button instead of pasting a token.
+
+### Privacy
+
+Everything runs in your browser. GitHub data is fetched directly from GitHub's API and **never sent to any server**. Results, config, and (if you opt in) your sign-in are cached only in your browser's `localStorage` so re-runs are fast; **Sign out** erases all of it. The optional OAuth proxy is stateless — it swaps the login code for a token and stores nothing.
 
 > Why `/stats/contributors` and not the commit search API? The search API only indexes default-branch authored commits and **silently misses** repos you've heavily contributed to. The stats endpoint counts all of a repo's history per author and is authoritative.
 

@@ -264,7 +264,7 @@ function Dashboard({
           </button>
           <button
             onClick={() => {
-              [LS_TOKEN, LS_DATA, LS_CFG].forEach((k) => localStorage.removeItem(k));
+              [LS_TOKEN, LS_DATA, LS_CFG, 'gpp:statscache'].forEach((k) => localStorage.removeItem(k));
               sessionStorage.removeItem('gpp:oauth_state');
               window.location.reload();
             }}
@@ -691,6 +691,7 @@ function SetupForm({
     new Set([...savedOrgs.map((o) => `org:${o}`), ...savedUsers.map((u) => `user:${u}`)]),
   );
   const [showToken, setShowToken] = useState(!oauthEnabled);
+  const [refresh, setRefresh] = useState(false);
 
   async function connect(tok: string) {
     const t = tok.trim();
@@ -757,6 +758,7 @@ function SetupForm({
         users: ids.filter((s) => s.startsWith('user:')).map((s) => s.slice(5)),
         since: since || undefined,
         token: token.trim(),
+        refresh,
       },
       remember,
     );
@@ -868,10 +870,16 @@ function SetupForm({
               <input type="date" className={inputCls} value={since} onChange={(e) => setSince(e.target.value)} />
             </label>
 
-            <label className="flex cursor-pointer items-center gap-2 text-xs text-white/45">
-              <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="accent-[var(--color-accent)]" />
-              Remember token in this browser
-            </label>
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-white/45">
+              <label className="flex cursor-pointer items-center gap-2">
+                <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="accent-[var(--color-accent)]" />
+                Remember sign-in in this browser
+              </label>
+              <label className="flex cursor-pointer items-center gap-2" title="Ignore the 6-hour per-repo cache and re-fetch everything">
+                <input type="checkbox" checked={refresh} onChange={(e) => setRefresh(e.target.checked)} className="accent-[var(--color-accent)]" />
+                Force refresh (ignore cache)
+              </label>
+            </div>
 
             <button
               type="submit"
@@ -913,6 +921,13 @@ function SetupForm({
           )}
         </div>
       </form>
+
+      <p className="mt-4 px-2 text-center text-[11px] leading-relaxed text-white/30">
+        🔒 Runs entirely in your browser. Your GitHub data is fetched straight from GitHub's API and
+        <strong className="font-medium text-white/45"> never sent to any server</strong>. Results and (optionally)
+        your sign-in are cached only in this browser's local storage so re-runs are fast — <strong className="font-medium text-white/45">Sign out</strong> erases
+        them. {oauthEnabled ? 'OAuth sign-in exchanges the login code through a stateless proxy that stores nothing.' : ''}
+      </p>
       <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={onUpload} />
     </div>
   );

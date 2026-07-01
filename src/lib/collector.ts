@@ -1,5 +1,6 @@
 import type { Dataset, RepoTotal, RepoWeek, WeekPoint } from './types';
 import { WEEK } from './data';
+import { cacheKey, freshEntry, loadStatsCache, saveStatsCache } from './cache';
 
 const API = 'https://api.github.com';
 
@@ -10,6 +11,7 @@ export interface CollectConfig {
   since?: string; // ISO date (YYYY-MM-DD)
   token: string;
   concurrency?: number;
+  refresh?: boolean; // bypass the per-repo cache and re-fetch everything
 }
 
 export interface CollectProgress {
@@ -309,41 +311,58 @@ export async function collect(
   let commits = 0;
   const contributed: { repo: string; language: string; weeks: RepoWeek[] }[] = [];
   const target = cfg.user.toLowerCase();
+  const cache = loadStatsCache();
+  const useCache = !cfg.refresh;
 
   const emitScan = (currentRepo: string) =>
     onProgress({ phase: 'scanning', scanned, total, found: total, contributed: contributed.length, commits, currentRepo, elapsedMs: Date.now() - t0 });
 
-  const record = (repo: RepoRef, stats: any[]) => {
+  // the author's weeks in a repo (c>0), UNfiltered by `since` so the cache
+  // stays valid regardless of the selected start date
+  const extractAllWeeks = (stats: any[]): RepoWeek[] => {
     const mine = stats.find((s: any) => s?.author?.login?.toLowerCase() === target);
-    if (mine) {
-      const weeks: RepoWeek[] = (mine.weeks || [])
-        .filter((w: any) => (w.c || 0) > 0 && (sinceUnix ? w.w >= sinceUnix : true))
-        .map((w: any) => ({ w: w.w, c: w.c || 0, a: w.a || 0, d: w.d || 0 }));
-      if (weeks.length) {
-        contributed.push({ repo: repo.full_name, language: repo.language, weeks });
-        commits += weeks.reduce((acc, w) => acc + w.c, 0);
-      }
+    if (!mine) return [];
+    return (mine.weeks || [])
+      .filter((w: any) => (w.c || 0) > 0)
+      .map((w: any) => ({ w: w.w, c: w.c || 0, a: w.a || 0, d: w.d || 0 }));
+  };
+  const applyAll = (repo: RepoRef, all: RepoWeek[]) => {
+    const weeks = sinceUnix ? all.filter((w) => w.w >= sinceUnix) : all;
+    if (weeks.length) {
+      contributed.push({ repo: repo.full_name, language: repo.language, weeks });
+      commits += weeks.reduce((acc, w) => acc + w.c, 0);
     }
     scanned++;
+  };
+  const store = (repo: RepoRef, all: RepoWeek[]) => {
+    cache[cacheKey(cfg.user, repo.full_name)] = { weeks: all.length ? all : null, ts: Date.now() };
   };
 
   const runPool = (work: () => Promise<void>, count: number) =>
     Promise.all(Array.from({ length: Math.max(0, Math.min(concurrency, count)) }, work));
 
-  // Pass 1 — touch every repo with a short retry. This kicks off GitHub's
-  // server-side stats computation for ALL repos in parallel; any still
+  // Pass 1 — cache hit → skip the network entirely; otherwise touch the repo
+  // (which kicks off GitHub's server-side stats computation). Repos still
   // computing are deferred so we don't serialize on them at the tail.
   const pending: RepoRef[] = [];
   let idx = 0;
   await runPool(async () => {
     while (idx < repos.length) {
       const repo = repos[idx++];
+      const hit = useCache ? freshEntry(cache, cacheKey(cfg.user, repo.full_name)) : undefined;
+      if (hit) {
+        applyAll(repo, hit.weeks || []);
+        emitScan(`${repo.full_name} · cached`);
+        continue;
+      }
       const stats = await statsContributors(repo.full_name, cfg.token, signal, undefined, 2);
       if (stats === null) {
         pending.push(repo);
         emitScan(`${repo.full_name} · GitHub is computing stats…`);
       } else {
-        record(repo, stats);
+        const all = extractAllWeeks(stats);
+        store(repo, all);
+        applyAll(repo, all);
         emitScan(repo.full_name);
       }
     }
@@ -365,11 +384,15 @@ export async function collect(
         skipped.push(repo.full_name); // still computing — skip rather than hang
         scanned++;
       } else {
-        record(repo, stats);
+        const all = extractAllWeeks(stats);
+        store(repo, all);
+        applyAll(repo, all);
       }
       emitScan(repo.full_name);
     }
   }, pending.length);
+
+  saveStatsCache(cache);
 
   onProgress({ phase: 'aggregating', scanned, total, found: total, contributed: contributed.length, commits, elapsedMs: Date.now() - t0 });
   await sleep(0, signal); // let the "Crunching…" frame paint before the synchronous build
