@@ -33,6 +33,27 @@ const LS_DATA = 'gpp:dataset';
 const LS_CFG = 'gpp:config';
 const LS_TOKEN = 'gpp:token';
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DEFAULT_MARKER = '2023-01-01';
+
+function urlDateParam(name: string): string | null {
+  const v = new URLSearchParams(window.location.search).get(name);
+  return v && ISO_DATE.test(v) ? v : null;
+}
+
+function download(href: string, filename: string) {
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = filename;
+  a.click();
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  download(url, filename);
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
 interface SavedConfig {
   user: string;
   orgs: string;
@@ -56,7 +77,7 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>(() => (loadCachedDataset() ? 'ready' : 'setup'));
   const [progress, setProgress] = useState<CollectProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [markerDate, setMarkerDate] = useState('2023-01-01');
+  const [markerDate, setMarkerDate] = useState(() => urlDateParam('marker') ?? DEFAULT_MARKER);
   const [oauthToken, setOauthToken] = useState<string | null>(null);
   const [oauthBusy, setOauthBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -192,13 +213,23 @@ function Dashboard({
   onUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onReconfigure: () => void;
 }) {
-  const [trim, setTrim] = useState(true);
+  const [trim, setTrim] = useState(() => new URLSearchParams(window.location.search).get('trim') !== '0');
   const fullStart = ds.weeks[0]?.date ?? '2020-01-01';
   const fullEnd = ds.weeks[ds.weeks.length - 1]?.date ?? fullStart;
-  const [range, setRange] = useState({ start: fullStart, end: fullEnd });
+  const [range, setRange] = useState(() => {
+    const from = urlDateParam('from');
+    const to = urlDateParam('to');
+    const clamp = (v: string) => (v < fullStart ? fullStart : v > fullEnd ? fullEnd : v);
+    return { start: from ? clamp(from) : fullStart, end: to ? clamp(to) : fullEnd };
+  });
 
-  // reset the range whenever a new dataset is loaded
+  // reset the range only when a NEW dataset is loaded — comparing identity
+  // (not skip-first-render, which StrictMode's double mount defeats) so a
+  // range arriving via the URL isn't clobbered
+  const prevDs = useRef(ds);
   useEffect(() => {
+    if (prevDs.current === ds) return;
+    prevDs.current = ds;
     setRange({ start: fullStart, end: fullEnd });
   }, [ds, fullStart, fullEnd]);
 
@@ -218,6 +249,47 @@ function Dashboard({
   const markerWeek = Math.floor((marker - Date.UTC(markerYear, 0, 1) / 1000) / WEEK);
   const isFiltered = range.start !== fullStart || range.end !== fullEnd;
 
+  // keep the view shareable: mirror range/marker/trim into the URL
+  useEffect(() => {
+    const p = new URLSearchParams();
+    if (isFiltered) {
+      p.set('from', range.start);
+      p.set('to', range.end);
+    }
+    if (markerDate !== DEFAULT_MARKER) p.set('marker', markerDate);
+    if (!trim) p.set('trim', '0');
+    const qs = p.toString();
+    window.history.replaceState(null, '', qs ? `?${qs}` : window.location.pathname);
+  }, [range.start, range.end, markerDate, trim, isFiltered]);
+
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [exporting, setExporting] = useState(false);
+
+  function exportCsv() {
+    const header = 'week_start,commits,lines_added,lines_deleted,net_lines,churn,avg_commit_size';
+    const rows = view.weeks.map((w) =>
+      [w.date, w.commits, w.additions, w.deletions, w.net, w.churn, w.avgCommitSize].join(','),
+    );
+    downloadBlob(
+      new Blob([[header, ...rows].join('\n')], { type: 'text/csv' }),
+      `${ds.meta.user}-weekly-${range.start}_${range.end}.csv`,
+    );
+  }
+
+  async function exportPng() {
+    if (!rootRef.current || exporting) return;
+    setExporting(true);
+    try {
+      const { toPng } = await import('html-to-image');
+      const url = await toPng(rootRef.current, { backgroundColor: '#05060a', pixelRatio: 1.5 });
+      download(url, `${ds.meta.user}-pulse.png`);
+    } catch (e) {
+      console.error('PNG export failed', e);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   function preset(spec: 'all' | { months: number } | { days: number }) {
     if (spec === 'all') return setRange({ start: fullStart, end: fullEnd });
     const end = new Date(fullEnd + 'T00:00:00Z');
@@ -235,7 +307,7 @@ function Dashboard({
   );
 
   return (
-    <div className="mx-auto max-w-[1200px] px-4 pb-20 pt-8 sm:px-6">
+    <div ref={rootRef} className="mx-auto max-w-[1200px] px-4 pb-20 pt-8 sm:px-6">
       {/* header */}
       <header className="mb-8 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
@@ -258,6 +330,21 @@ function Dashboard({
             className="rounded-lg border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-accent transition hover:border-accent hover:bg-accent/20"
           >
             ⚙ New analysis
+          </button>
+          <button
+            onClick={exportCsv}
+            title="Download the filtered weekly data as CSV"
+            className="rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-white/70 transition hover:border-accent hover:text-white"
+          >
+            ↓ CSV
+          </button>
+          <button
+            onClick={exportPng}
+            disabled={exporting}
+            title="Download the whole dashboard as a PNG image"
+            className="rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-white/70 transition hover:border-accent hover:text-white disabled:opacity-50"
+          >
+            {exporting ? 'Rendering…' : '↓ PNG'}
           </button>
           <button
             onClick={() => fileRef.current?.click()}
@@ -1062,6 +1149,13 @@ function ProgressView({ progress, onCancel }: { progress: CollectProgress | null
 
         {p?.currentRepo && (
           <p className="mt-2 truncate text-xs text-white/30">{p.currentRepo}</p>
+        )}
+
+        {p?.rateRemaining !== undefined && (
+          <p className={`mt-1 text-[11px] ${p.rateRemaining < 500 ? 'text-amber' : 'text-white/25'}`}>
+            GitHub API budget: {p.rateRemaining.toLocaleString()} / {(p.rateLimit ?? 5000).toLocaleString()} requests
+            remaining this hour
+          </p>
         )}
 
         <button

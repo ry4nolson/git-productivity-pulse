@@ -23,7 +23,13 @@ export interface CollectProgress {
   commits: number;
   currentRepo?: string;
   elapsedMs: number;
+  rateRemaining?: number; // GitHub API requests left this hour
+  rateLimit?: number;
 }
+
+// latest rate-limit headers seen on any GitHub response
+let rate: { remaining: number; limit: number } | null = null;
+const rateFields = () => (rate ? { rateRemaining: rate.remaining, rateLimit: rate.limit } : {});
 
 export class GitHubError extends Error {
   status?: number;
@@ -59,6 +65,11 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 async function ghFetch(path: string, token: string, signal?: AbortSignal): Promise<Response> {
   const url = path.startsWith('http') ? path : API + path;
   const res = await fetch(url, { headers: authHeaders(token), signal });
+
+  const remaining = res.headers.get('x-ratelimit-remaining');
+  if (remaining !== null) {
+    rate = { remaining: Number(remaining), limit: Number(res.headers.get('x-ratelimit-limit')) || 5000 };
+  }
 
   if (res.status === 401) throw new GitHubError('Bad credentials — check that your token is valid.', 401);
 
@@ -300,7 +311,7 @@ export async function collect(
   onProgress({ phase: 'enumerating', scanned: 0, total: 0, found: 0, contributed: 0, commits: 0, currentRepo: 'listing repositories…', elapsedMs: 0 });
   const onPage = (added: number) => {
     found += added;
-    onProgress({ phase: 'enumerating', scanned: 0, total: 0, found, contributed: 0, commits: 0, currentRepo: `${found} repositories found…`, elapsedMs: Date.now() - t0 });
+    onProgress({ phase: 'enumerating', scanned: 0, total: 0, found, contributed: 0, commits: 0, currentRepo: `${found} repositories found…`, elapsedMs: Date.now() - t0, ...rateFields() });
   };
 
   const lists = await Promise.all([
@@ -327,7 +338,7 @@ export async function collect(
   const useCache = !cfg.refresh;
 
   const emitScan = (currentRepo: string) =>
-    onProgress({ phase: 'scanning', scanned, total, found: total, contributed: contributed.length, commits, currentRepo, elapsedMs: Date.now() - t0 });
+    onProgress({ phase: 'scanning', scanned, total, found: total, contributed: contributed.length, commits, currentRepo, elapsedMs: Date.now() - t0, ...rateFields() });
 
   // every author's weeks in a repo (c>0), UNfiltered by `since` so the cache
   // stays valid regardless of the selected start date or measured user
@@ -432,7 +443,7 @@ export async function collect(
 
   saveStatsCache(cache);
 
-  onProgress({ phase: 'aggregating', scanned, total, found: total, contributed: contributed.length, commits, elapsedMs: Date.now() - t0 });
+  onProgress({ phase: 'aggregating', scanned, total, found: total, contributed: contributed.length, commits, elapsedMs: Date.now() - t0, ...rateFields() });
   await sleep(0, signal); // let the "Crunching…" frame paint before the synchronous build
   const dataset = buildDataset(cfg, total, contributed, t0);
   dataset.authors = [...authorAgg.entries()]
@@ -444,6 +455,6 @@ export async function collect(
     }))
     .sort((x, y) => y.weekly.reduce((s, w) => s + w.c, 0) - x.weekly.reduce((s, w) => s + w.c, 0));
   if (skipped.length) dataset.meta.skipped = skipped;
-  onProgress({ phase: 'done', scanned, total, found: total, contributed: contributed.length, commits: dataset.totals.commits, elapsedMs: Date.now() - t0 });
+  onProgress({ phase: 'done', scanned, total, found: total, contributed: contributed.length, commits: dataset.totals.commits, elapsedMs: Date.now() - t0, ...rateFields() });
   return dataset;
 }
