@@ -67,6 +67,7 @@ node scripts/collect.mjs --user YOUR_GH_LOGIN --orgs org1,org2 --since 2021-01-0
 - **Commit size over time** — average LOC per commit; a tighter AI loop often shows smaller, steadier commits.
 - **Activity heatmap** — commits per week by calendar year.
 - **Top repositories** and **languages**.
+- **Leaderboard** — every contributor across the scanned repos (same API responses, zero extra calls), ranked with a monthly-commits comparison chart for the top 6. Forked repos are excluded from the leaderboard so upstream contributors don't pollute it; bots (`*[bot]`) are hidden.
 
 ## Notes & caveats
 

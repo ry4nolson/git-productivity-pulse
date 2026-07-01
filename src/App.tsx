@@ -5,11 +5,14 @@ import {
   collect,
   exchangeOAuthCode,
   getViewer,
+  listOrgMembers,
   listOrgs,
   type CollectConfig,
   type CollectProgress,
   type GhOrg,
+  type OrgMember,
 } from './lib/collector';
+import { Leaderboard } from './components/Leaderboard';
 
 const OAUTH_CLIENT_ID = import.meta.env.VITE_GITHUB_CLIENT_ID as string | undefined;
 const OAUTH_PROXY_URL = import.meta.env.VITE_OAUTH_PROXY_URL as string | undefined;
@@ -264,7 +267,7 @@ function Dashboard({
           </button>
           <button
             onClick={() => {
-              [LS_TOKEN, LS_DATA, LS_CFG, 'gpp:statscache'].forEach((k) => localStorage.removeItem(k));
+              [LS_TOKEN, LS_DATA, LS_CFG, 'gpp:statscache', 'gpp:statscache2'].forEach((k) => localStorage.removeItem(k));
               sessionStorage.removeItem('gpp:oauth_state');
               window.location.reload();
             }}
@@ -454,6 +457,18 @@ function Dashboard({
           </Section>
         </div>
       </div>
+
+      {/* leaderboard */}
+      {ds.authors && ds.authors.length > 1 && (
+        <div className="mb-6">
+          <Section
+            title="Leaderboard"
+            subtitle="Every contributor across the scanned repos, in the selected date range. Monthly commits for the top 6."
+          >
+            <Leaderboard authors={ds.authors} startUnix={startUnix} endUnix={endUnix} highlight={ds.meta.user} />
+          </Section>
+        </div>
+      )}
 
       {/* fun facts */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -692,6 +707,7 @@ function SetupForm({
   );
   const [showToken, setShowToken] = useState(!oauthEnabled);
   const [refresh, setRefresh] = useState(false);
+  const [members, setMembers] = useState<OrgMember[]>([]);
 
   async function connect(tok: string) {
     const t = tok.trim();
@@ -727,6 +743,31 @@ function SetupForm({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [oauthToken]);
+
+  // load members of the selected orgs so "username to measure" is a picker
+  useEffect(() => {
+    if (!viewer || !token.trim()) return;
+    const orgLogins = [...selected].filter((s) => s.startsWith('org:')).map((s) => s.slice(4));
+    if (orgLogins.length === 0) {
+      setMembers([]);
+      return;
+    }
+    let stale = false;
+    Promise.all(orgLogins.map((o) => listOrgMembers(o, token.trim()))).then((lists) => {
+      if (stale) return;
+      const seen = new Set<string>();
+      setMembers(
+        lists
+          .flat()
+          .filter((m) => !seen.has(m.login) && seen.add(m.login))
+          .sort((a, b) => a.login.localeCompare(b.login)),
+      );
+    });
+    return () => {
+      stale = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, viewer]);
 
   function toggle(id: string) {
     setSelected((prev) => {
@@ -850,11 +891,6 @@ function SetupForm({
         {/* connected: configure */}
         {viewer && (
           <>
-            <label className="text-xs font-medium uppercase tracking-wider text-white/45">
-              Username to measure
-              <input className={inputCls} value={measureUser} onChange={(e) => setMeasureUser(e.target.value)} placeholder={viewer} />
-            </label>
-
             <div className="text-xs font-medium uppercase tracking-wider text-white/45">
               Organizations &amp; accounts to scan
               <div className="mt-1 font-sans normal-case">
@@ -864,6 +900,27 @@ function SetupForm({
                 Tick your own account (<span className="text-white/50">@{viewer}</span>) to include your personal repos.
               </p>
             </div>
+
+            <label className="text-xs font-medium uppercase tracking-wider text-white/45">
+              Username to measure
+              <input
+                className={inputCls}
+                value={measureUser}
+                onChange={(e) => setMeasureUser(e.target.value)}
+                placeholder={viewer}
+                list="gpp-org-members"
+              />
+              <datalist id="gpp-org-members">
+                {members.map((m) => (
+                  <option key={m.login} value={m.login} />
+                ))}
+              </datalist>
+              {members.length > 0 && (
+                <p className="mt-1 font-sans text-[11px] normal-case text-white/30">
+                  Pick from {members.length} org member{members.length > 1 ? 's' : ''} or type any login.
+                </p>
+              )}
+            </label>
 
             <label className="text-xs font-medium uppercase tracking-wider text-white/45">
               Since

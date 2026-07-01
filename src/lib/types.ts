@@ -36,6 +36,13 @@ export interface LangTotal {
   repos: number;
 }
 
+export interface AuthorStat {
+  login: string;
+  avatarUrl: string;
+  repos: number;
+  weekly: RepoWeek[]; // aggregated across all scanned repos, since-filtered
+}
+
 export interface Dataset {
   meta: {
     user: string;
@@ -60,4 +67,5 @@ export interface Dataset {
   weeks: WeekPoint[];
   repos: RepoTotal[];
   languages: LangTotal[];
+  authors?: AuthorStat[]; // every contributor across the scanned repos
 }

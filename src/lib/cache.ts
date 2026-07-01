@@ -1,13 +1,17 @@
 import type { RepoWeek } from './types';
 
-// Per-repo stats cache (localStorage). Keyed by user+repo, stores the author's
-// unfiltered weekly data (or null for no contribution) so re-runs skip the
-// network for repos GitHub hasn't changed. Everything stays in the browser.
-const KEY = 'gpp:statscache';
+// Per-repo stats cache (localStorage). Keyed by repo, storing EVERY author's
+// weekly data (c>0, unfiltered by `since`) — so re-runs skip the network for
+// unchanged repos regardless of which user is measured or what date range is
+// picked. Everything stays in the browser.
+const KEY = 'gpp:statscache2';
+export const CACHE_KEYS = ['gpp:statscache', KEY]; // v1 included for cleanup
 export const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+export type RepoAuthors = Record<string, { av: string; w: RepoWeek[] }>;
+
 interface CacheEntry {
-  weeks: RepoWeek[] | null;
+  authors: RepoAuthors;
   ts: number;
 }
 type Store = Record<string, CacheEntry>;
@@ -47,18 +51,16 @@ export function saveStatsCache(store: Store): void {
 
 export function clearStatsCache(): void {
   const s = storage();
-  try {
-    s?.removeItem(KEY);
-  } catch {
-    /* ignore */
+  for (const k of CACHE_KEYS) {
+    try {
+      s?.removeItem(k);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
-export function cacheKey(user: string, repo: string): string {
-  return `${user.toLowerCase()}:${repo}`;
-}
-
-export function freshEntry(store: Store, key: string, ttlMs = DEFAULT_TTL_MS): CacheEntry | undefined {
-  const e = store[key];
-  return e && Date.now() - e.ts < ttlMs ? e : undefined;
+export function freshEntry(store: Store, repo: string, ttlMs = DEFAULT_TTL_MS): CacheEntry | undefined {
+  const e = store[repo];
+  return e && e.authors && Date.now() - e.ts < ttlMs ? e : undefined;
 }

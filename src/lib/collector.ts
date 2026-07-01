@@ -1,6 +1,6 @@
-import type { Dataset, RepoTotal, RepoWeek, WeekPoint } from './types';
+import type { AuthorStat, Dataset, RepoTotal, RepoWeek, WeekPoint } from './types';
 import { WEEK } from './data';
-import { cacheKey, freshEntry, loadStatsCache, saveStatsCache } from './cache';
+import { freshEntry, loadStatsCache, saveStatsCache, type RepoAuthors } from './cache';
 
 const API = 'https://api.github.com';
 
@@ -136,6 +136,7 @@ async function statsContributors(
 interface RepoRef {
   full_name: string;
   language: string;
+  fork: boolean;
 }
 
 export interface GhUser {
@@ -155,6 +156,17 @@ export async function getViewer(token: string, signal?: AbortSignal): Promise<Gh
   if (!res.ok) throw new GitHubError(`Couldn't verify token (GitHub ${res.status}).`, res.status);
   const u = await res.json();
   return { login: u.login, name: u.name ?? null, avatarUrl: u.avatar_url };
+}
+
+export interface OrgMember {
+  login: string;
+  avatarUrl: string;
+}
+
+/** members of an org (requires the token's user to be a member; else empty) */
+export async function listOrgMembers(org: string, token: string, signal?: AbortSignal): Promise<OrgMember[]> {
+  const members = await paginate(`/orgs/${encodeURIComponent(org)}/members?per_page=100`, token, signal).catch(() => []);
+  return members.map((m: any) => ({ login: m.login, avatarUrl: m.avatar_url || '' }));
 }
 
 /** orgs the token's user belongs to (needs read:org for private orgs) */
@@ -300,7 +312,7 @@ export async function collect(
   const repos: RepoRef[] = lists
     .flat()
     .filter((r) => r && r.full_name && !seen.has(r.full_name) && seen.add(r.full_name))
-    .map((r) => ({ full_name: r.full_name, language: r.language || 'Other' }));
+    .map((r) => ({ full_name: r.full_name, language: r.language || 'Other', fork: !!r.fork }));
 
   if (repos.length === 0) {
     throw new GitHubError('No repositories found for those orgs/users (or the token lacks access).');
@@ -317,25 +329,51 @@ export async function collect(
   const emitScan = (currentRepo: string) =>
     onProgress({ phase: 'scanning', scanned, total, found: total, contributed: contributed.length, commits, currentRepo, elapsedMs: Date.now() - t0 });
 
-  // the author's weeks in a repo (c>0), UNfiltered by `since` so the cache
-  // stays valid regardless of the selected start date
-  const extractAllWeeks = (stats: any[]): RepoWeek[] => {
-    const mine = stats.find((s: any) => s?.author?.login?.toLowerCase() === target);
-    if (!mine) return [];
-    return (mine.weeks || [])
-      .filter((w: any) => (w.c || 0) > 0)
-      .map((w: any) => ({ w: w.w, c: w.c || 0, a: w.a || 0, d: w.d || 0 }));
+  // every author's weeks in a repo (c>0), UNfiltered by `since` so the cache
+  // stays valid regardless of the selected start date or measured user
+  const authorsFromStats = (stats: any[]): RepoAuthors => {
+    const out: RepoAuthors = {};
+    for (const s of stats) {
+      const login = s?.author?.login;
+      if (!login) continue;
+      const w: RepoWeek[] = (s.weeks || [])
+        .filter((x: any) => (x.c || 0) > 0)
+        .map((x: any) => ({ w: x.w, c: x.c || 0, a: x.a || 0, d: x.d || 0 }));
+      if (w.length) out[login] = { av: s.author.avatar_url || '', w };
+    }
+    return out;
   };
-  const applyAll = (repo: RepoRef, all: RepoWeek[]) => {
-    const weeks = sinceUnix ? all.filter((w) => w.w >= sinceUnix) : all;
-    if (weeks.length) {
-      contributed.push({ repo: repo.full_name, language: repo.language, weeks });
-      commits += weeks.reduce((acc, w) => acc + w.c, 0);
+
+  // aggregate every author for the leaderboard; pull the measured user's
+  // weeks out of the same data for the per-repo dashboard breakdowns
+  const authorAgg = new Map<string, { av: string; repos: number; weeks: Map<number, { c: number; a: number; d: number }> }>();
+  const applyRepo = (repo: RepoRef, ra: RepoAuthors) => {
+    for (const [login, v] of Object.entries(ra)) {
+      const weeks = sinceUnix ? v.w.filter((w) => w.w >= sinceUnix) : v.w;
+      if (!weeks.length) continue;
+      if (login.toLowerCase() === target) {
+        contributed.push({ repo: repo.full_name, language: repo.language, weeks });
+        commits += weeks.reduce((acc, w) => acc + w.c, 0);
+      }
+      // forks inherit the upstream's whole contributor history — counting it
+      // would flood the leaderboard with people who never touched this org
+      if (repo.fork && login.toLowerCase() !== target) continue;
+      const agg = authorAgg.get(login) ?? { av: v.av, repos: 0, weeks: new Map() };
+      if (!agg.av && v.av) agg.av = v.av;
+      agg.repos++;
+      for (const w of weeks) {
+        const cur = agg.weeks.get(w.w) ?? { c: 0, a: 0, d: 0 };
+        cur.c += w.c;
+        cur.a += w.a;
+        cur.d += w.d;
+        agg.weeks.set(w.w, cur);
+      }
+      authorAgg.set(login, agg);
     }
     scanned++;
   };
-  const store = (repo: RepoRef, all: RepoWeek[]) => {
-    cache[cacheKey(cfg.user, repo.full_name)] = { weeks: all.length ? all : null, ts: Date.now() };
+  const store = (repo: RepoRef, ra: RepoAuthors) => {
+    cache[repo.full_name] = { authors: ra, ts: Date.now() };
   };
 
   const runPool = (work: () => Promise<void>, count: number) =>
@@ -349,9 +387,9 @@ export async function collect(
   await runPool(async () => {
     while (idx < repos.length) {
       const repo = repos[idx++];
-      const hit = useCache ? freshEntry(cache, cacheKey(cfg.user, repo.full_name)) : undefined;
+      const hit = useCache ? freshEntry(cache, repo.full_name) : undefined;
       if (hit) {
-        applyAll(repo, hit.weeks || []);
+        applyRepo(repo, hit.authors);
         emitScan(`${repo.full_name} · cached`);
         continue;
       }
@@ -360,9 +398,9 @@ export async function collect(
         pending.push(repo);
         emitScan(`${repo.full_name} · GitHub is computing stats…`);
       } else {
-        const all = extractAllWeeks(stats);
-        store(repo, all);
-        applyAll(repo, all);
+        const ra = authorsFromStats(stats);
+        store(repo, ra);
+        applyRepo(repo, ra);
         emitScan(repo.full_name);
       }
     }
@@ -384,9 +422,9 @@ export async function collect(
         skipped.push(repo.full_name); // still computing — skip rather than hang
         scanned++;
       } else {
-        const all = extractAllWeeks(stats);
-        store(repo, all);
-        applyAll(repo, all);
+        const ra = authorsFromStats(stats);
+        store(repo, ra);
+        applyRepo(repo, ra);
       }
       emitScan(repo.full_name);
     }
@@ -397,6 +435,14 @@ export async function collect(
   onProgress({ phase: 'aggregating', scanned, total, found: total, contributed: contributed.length, commits, elapsedMs: Date.now() - t0 });
   await sleep(0, signal); // let the "Crunching…" frame paint before the synchronous build
   const dataset = buildDataset(cfg, total, contributed, t0);
+  dataset.authors = [...authorAgg.entries()]
+    .map(([login, v]): AuthorStat => ({
+      login,
+      avatarUrl: v.av,
+      repos: v.repos,
+      weekly: [...v.weeks.entries()].sort((x, y) => x[0] - y[0]).map(([w, t]) => ({ w, c: t.c, a: t.a, d: t.d })),
+    }))
+    .sort((x, y) => y.weekly.reduce((s, w) => s + w.c, 0) - x.weekly.reduce((s, w) => s + w.c, 0));
   if (skipped.length) dataset.meta.skipped = skipped;
   onProgress({ phase: 'done', scanned, total, found: total, contributed: contributed.length, commits: dataset.totals.commits, elapsedMs: Date.now() - t0 });
   return dataset;
