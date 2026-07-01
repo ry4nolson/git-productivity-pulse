@@ -216,6 +216,11 @@ export function markerToUnix(dateStr: string): number {
   return Math.floor(Date.parse(dateStr + 'T00:00:00Z') / 1000);
 }
 
+// GitHub's weekly buckets start on Sundays (UTC); 1970-01-04 was a Sunday
+export function floorWeek(unix: number): number {
+  return unix - ((((unix - 259200) % WEEK) + WEEK) % WEEK);
+}
+
 export function percentile(values: number[], p: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Dataset } from './lib/types';
-import { clipWeeks, deriveDataset, fmt, fmtFull, markerToUnix, splitByEra, WEEK } from './lib/data';
+import { clipWeeks, deriveDataset, floorWeek, fmt, fmtFull, markerToUnix, splitByEra, WEEK } from './lib/data';
 import {
   collect,
   exchangeOAuthCode,
@@ -36,9 +36,42 @@ const LS_TOKEN = 'gpp:token';
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_MARKER = '2023-01-01';
 
+type PresetSpec =
+  | 'all'
+  | 'thisWeek'
+  | 'lastWeek'
+  | 'thisMonth'
+  | 'lastMonth'
+  | { months: number }
+  | { trailingDays: number };
+
+// long-horizon presets anchor to the last data week; calendar/trailing ones to today
+const PRESETS: ReadonlyArray<readonly [string, PresetSpec]> = [
+  ['All', 'all'],
+  ['5y', { months: 60 }],
+  ['3y', { months: 36 }],
+  ['1y', { months: 12 }],
+  ['6m', { months: 6 }],
+  ['3m', { months: 3 }],
+  ['30d', { trailingDays: 30 }],
+  ['14d', { trailingDays: 14 }],
+  ['7d', { trailingDays: 7 }],
+  ['This wk', 'thisWeek'],
+  ['Last wk', 'lastWeek'],
+  ['This mo', 'thisMonth'],
+  ['Last mo', 'lastMonth'],
+];
+
+type CompareMode = 'off' | 'prev' | 'yoy';
+
 function urlDateParam(name: string): string | null {
   const v = new URLSearchParams(window.location.search).get(name);
   return v && ISO_DATE.test(v) ? v : null;
+}
+
+function ratioOf(post: number, pre: number): number {
+  if (!pre) return post ? Infinity : 0;
+  return post / pre;
 }
 
 function download(href: string, filename: string) {
@@ -214,6 +247,10 @@ function Dashboard({
   onReconfigure: () => void;
 }) {
   const [trim, setTrim] = useState(() => new URLSearchParams(window.location.search).get('trim') !== '0');
+  const [compare, setCompare] = useState<CompareMode>(() => {
+    const v = new URLSearchParams(window.location.search).get('cmp');
+    return v === 'prev' || v === 'yoy' ? v : 'off';
+  });
   const fullStart = ds.weeks[0]?.date ?? '2020-01-01';
   const fullEnd = ds.weeks[ds.weeks.length - 1]?.date ?? fullStart;
   const [range, setRange] = useState(() => {
@@ -233,8 +270,11 @@ function Dashboard({
     setRange({ start: fullStart, end: fullEnd });
   }, [ds, fullStart, fullEnd]);
 
-  const startUnix = markerToUnix(range.start);
-  const endUnix = markerToUnix(range.end) + WEEK; // inclusive of the end week
+  // buckets are keyed by their Sunday start: floor the From date onto its
+  // bucket, and w <= To already includes To's bucket (no +WEEK — that pulled
+  // in a bucket AFTER the To date)
+  const startUnix = floorWeek(markerToUnix(range.start));
+  const endUnix = markerToUnix(range.end);
   const view = useMemo(() => deriveDataset(ds, startUnix, endUnix), [ds, startUnix, endUnix]);
 
   const marker = markerToUnix(markerDate);
@@ -258,9 +298,39 @@ function Dashboard({
     }
     if (markerDate !== DEFAULT_MARKER) p.set('marker', markerDate);
     if (!trim) p.set('trim', '0');
+    if (compare !== 'off') p.set('cmp', compare);
     const qs = p.toString();
     window.history.replaceState(null, '', qs ? `?${qs}` : window.location.pathname);
-  }, [range.start, range.end, markerDate, trim, isFiltered]);
+  }, [range.start, range.end, markerDate, trim, isFiltered, compare]);
+
+  // period comparison: same number of week-buckets immediately before the
+  // selected range, or the same calendar range shifted back one year
+  const curWeekSpan = (floorWeek(endUnix) - startUnix) / WEEK + 1;
+  const comparison = useMemo(() => {
+    if (compare === 'off') return null;
+    let cmpStart: number;
+    let cmpEnd: number;
+    if (compare === 'prev') {
+      cmpStart = startUnix - curWeekSpan * WEEK;
+      cmpEnd = startUnix - 1;
+    } else {
+      const s = new Date(range.start + 'T00:00:00Z');
+      s.setUTCFullYear(s.getUTCFullYear() - 1);
+      const e = new Date(range.end + 'T00:00:00Z');
+      e.setUTCFullYear(e.getUTCFullYear() - 1);
+      cmpStart = floorWeek(Math.floor(s.getTime() / 1000));
+      cmpEnd = Math.floor(e.getTime() / 1000);
+    }
+    const cmpView = deriveDataset(ds, cmpStart, cmpEnd);
+    const weekSpan = Math.max(1, (floorWeek(cmpEnd) - cmpStart) / WEEK + 1);
+    const isoOf = (u: number) => new Date(u * 1000).toISOString().slice(0, 10);
+    return {
+      view: cmpView,
+      weekSpan,
+      label: `${isoOf(cmpStart)} → ${isoOf(cmpEnd)}`,
+      partial: cmpStart < markerToUnix(fullStart),
+    };
+  }, [compare, ds, startUnix, endUnix, curWeekSpan, range.start, range.end, fullStart]);
 
   const rootRef = useRef<HTMLDivElement>(null);
   const [exporting, setExporting] = useState(false);
@@ -290,14 +360,44 @@ function Dashboard({
     }
   }
 
-  function preset(spec: 'all' | { months: number } | { days: number }) {
+  function preset(spec: PresetSpec) {
     if (spec === 'all') return setRange({ start: fullStart, end: fullEnd });
-    const end = new Date(fullEnd + 'T00:00:00Z');
-    const start = new Date(end);
-    if ('months' in spec) start.setUTCMonth(start.getUTCMonth() - spec.months);
-    else start.setUTCDate(start.getUTCDate() - spec.days);
-    const clamped = start.toISOString().slice(0, 10);
-    setRange({ start: clamped < fullStart ? fullStart : clamped, end: fullEnd });
+    const clamp = (v: string) => (v < fullStart ? fullStart : v > fullEnd ? fullEnd : v);
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
+    const set = (s: Date, e: Date) => setRange({ start: clamp(iso(s)), end: clamp(iso(e)) });
+    const today = new Date();
+
+    if (typeof spec === 'object' && 'months' in spec) {
+      const end = new Date(fullEnd + 'T00:00:00Z');
+      const start = new Date(end);
+      start.setUTCMonth(start.getUTCMonth() - spec.months);
+      return set(start, end);
+    }
+    if (typeof spec === 'object') {
+      const start = new Date(today);
+      start.setUTCDate(start.getUTCDate() - (spec.trailingDays - 1));
+      return set(start, today);
+    }
+    const sunday = new Date(today);
+    sunday.setUTCDate(sunday.getUTCDate() - sunday.getUTCDay());
+    switch (spec) {
+      case 'thisWeek':
+        return set(sunday, today);
+      case 'lastWeek': {
+        const s = new Date(sunday);
+        s.setUTCDate(s.getUTCDate() - 7);
+        const e = new Date(sunday);
+        e.setUTCDate(e.getUTCDate() - 1);
+        return set(s, e);
+      }
+      case 'thisMonth':
+        return set(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1)), today);
+      case 'lastMonth':
+        return set(
+          new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - 1, 1)),
+          new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 0)),
+        );
+    }
   }
 
   const topLang = view.languages[0];
@@ -393,17 +493,7 @@ function Dashboard({
           </label>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
-          {([
-            ['All', 'all'],
-            ['5y', { months: 60 }],
-            ['3y', { months: 36 }],
-            ['1y', { months: 12 }],
-            ['6m', { months: 6 }],
-            ['3m', { months: 3 }],
-            ['1m', { months: 1 }],
-            ['2w', { days: 14 }],
-            ['1w', { days: 7 }],
-          ] as const).map(([lbl, m]) => (
+          {PRESETS.map(([lbl, m]) => (
             <button
               key={lbl}
               onClick={() => preset(m)}
@@ -413,7 +503,19 @@ function Dashboard({
             </button>
           ))}
         </div>
-        <div className="flex items-end gap-4 sm:ml-auto">
+        <div className="flex flex-wrap items-end gap-4 sm:ml-auto">
+          <label className="flex flex-col text-xs text-white/40">
+            Compare
+            <select
+              value={compare}
+              onChange={(e) => setCompare(e.target.value as CompareMode)}
+              className="mt-1 rounded-lg border border-line bg-panel-2 px-3 py-[7px] text-sm text-white outline-none focus:border-accent"
+            >
+              <option value="off">Off</option>
+              <option value="prev">vs previous period</option>
+              <option value="yoy">vs same period last year</option>
+            </select>
+          </label>
           <label className="flex flex-col text-xs text-white/40">
             AI marker
             <input
@@ -437,6 +539,52 @@ function Dashboard({
           </label>
         </div>
       </div>
+
+      {/* period comparison */}
+      {comparison && (
+        <div className="mb-6">
+          <Section
+            title="Comparison"
+            subtitle={`${range.start} → ${range.end} vs ${comparison.label} (${compare === 'prev' ? 'previous period' : 'same period last year'})`}
+          >
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <MiniDelta
+                label="Commits"
+                pre={comparison.view.totals.commits}
+                post={view.totals.commits}
+                ratio={ratioOf(view.totals.commits, comparison.view.totals.commits)}
+                format={fmt}
+              />
+              <MiniDelta
+                label="Lines changed"
+                pre={comparison.view.totals.churn}
+                post={view.totals.churn}
+                ratio={ratioOf(view.totals.churn, comparison.view.totals.churn)}
+                format={fmt}
+              />
+              <MiniDelta
+                label="Commits / wk"
+                pre={comparison.view.totals.commits / comparison.weekSpan}
+                post={view.totals.commits / curWeekSpan}
+                ratio={ratioOf(view.totals.commits / curWeekSpan, comparison.view.totals.commits / comparison.weekSpan)}
+                digits={1}
+              />
+              <MiniDelta
+                label="Active weeks"
+                pre={comparison.view.totals.weeksActive}
+                post={view.totals.weeksActive}
+                ratio={ratioOf(view.totals.weeksActive, comparison.view.totals.weeksActive)}
+              />
+            </div>
+            {comparison.partial && (
+              <p className="mt-3 text-xs text-amber/80">
+                ⚠ The comparison period starts before the collected data ({fullStart}), so its numbers may be
+                understated.
+              </p>
+            )}
+          </Section>
+        </div>
+      )}
 
       {/* the headline: AI-era impact */}
       <div className="card rise relative mb-6 overflow-hidden p-6 sm:p-8">
@@ -591,6 +739,7 @@ function MiniDelta({
   ratio,
   suffix = '',
   digits = 0,
+  format,
 }: {
   label: string;
   pre: number;
@@ -598,13 +747,15 @@ function MiniDelta({
   ratio: number;
   suffix?: string;
   digits?: number;
+  format?: (n: number) => string;
 }) {
   const up = post >= pre;
+  const show = (n: number) => (format ? format(n) : n.toFixed(digits));
   return (
     <div className="rounded-xl border border-line bg-panel-2/60 p-3">
       <div className="text-[10px] font-medium uppercase tracking-wider text-white/40">{label}</div>
       <div className="tnum mt-1 text-xl font-bold text-white">
-        {post.toFixed(digits)}
+        {show(post)}
         {suffix}
       </div>
       <div className="mt-1 flex items-center gap-1.5">
@@ -612,7 +763,7 @@ function MiniDelta({
           {up ? '▲' : '▼'} {multiple(ratio)}
         </Pill>
         <span className="tnum text-[11px] text-white/35">
-          from {pre.toFixed(digits)}
+          from {show(pre)}
           {suffix}
         </span>
       </div>
