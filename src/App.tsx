@@ -13,6 +13,50 @@ import {
   type OrgMember,
 } from './lib/collector';
 import { Leaderboard } from './components/Leaderboard';
+import CreatableSelect from 'react-select/creatable';
+import type { StylesConfig } from 'react-select';
+
+interface UserOption {
+  value: string;
+  label: string;
+  avatarUrl?: string;
+  __isNew__?: boolean;
+}
+
+// Tailwind v4 vars hold complete color values — use them directly
+const userSelectStyles: StylesConfig<UserOption, false> = {
+  control: (base, state) => ({
+    ...base,
+    backgroundColor: 'var(--color-ink)',
+    borderColor: state.isFocused ? 'var(--color-accent)' : 'var(--color-line)',
+    borderRadius: 8,
+    minHeight: 38,
+    boxShadow: 'none',
+    ':hover': { borderColor: 'var(--color-accent)' },
+  }),
+  menu: (base) => ({
+    ...base,
+    backgroundColor: 'var(--color-panel-2)',
+    border: '1px solid var(--color-line)',
+    borderRadius: 8,
+    overflow: 'hidden',
+    zIndex: 30,
+  }),
+  option: (base, state) => ({
+    ...base,
+    backgroundColor: state.isFocused ? 'rgba(255,255,255,0.06)' : 'transparent',
+    color: 'rgba(255,255,255,0.85)',
+    cursor: 'pointer',
+    ':active': { backgroundColor: 'rgba(255,255,255,0.1)' },
+  }),
+  singleValue: (base) => ({ ...base, color: '#fff' }),
+  input: (base) => ({ ...base, color: '#fff' }),
+  placeholder: (base) => ({ ...base, color: 'rgba(255,255,255,0.25)' }),
+  indicatorSeparator: () => ({ display: 'none' }),
+  dropdownIndicator: (base) => ({ ...base, color: 'rgba(255,255,255,0.4)', ':hover': { color: '#fff' } }),
+  clearIndicator: (base) => ({ ...base, color: 'rgba(255,255,255,0.4)', ':hover': { color: 'var(--color-neg)' } }),
+  noOptionsMessage: (base) => ({ ...base, color: 'rgba(255,255,255,0.4)' }),
+};
 
 const OAUTH_CLIENT_ID = import.meta.env.VITE_GITHUB_CLIENT_ID as string | undefined;
 const OAUTH_PROXY_URL = import.meta.env.VITE_OAUTH_PROXY_URL as string | undefined;
@@ -1139,26 +1183,49 @@ function SetupForm({
               </p>
             </div>
 
-            <label className="text-xs font-medium uppercase tracking-wider text-white/45">
+            <div className="text-xs font-medium uppercase tracking-wider text-white/45">
               Username to measure
-              <input
-                className={inputCls}
-                value={measureUser}
-                onChange={(e) => setMeasureUser(e.target.value)}
-                placeholder={viewer}
-                list="gpp-org-members"
-              />
-              <datalist id="gpp-org-members">
-                {members.map((m) => (
-                  <option key={m.login} value={m.login} />
-                ))}
-              </datalist>
+              <div className="mt-1 font-sans text-sm normal-case tracking-normal">
+                <CreatableSelect<UserOption, false>
+                  options={members.map((m) => ({ value: m.login, label: m.login, avatarUrl: m.avatarUrl }))}
+                  value={
+                    measureUser
+                      ? {
+                          value: measureUser,
+                          label: measureUser,
+                          avatarUrl: members.find((m) => m.login === measureUser)?.avatarUrl,
+                        }
+                      : null
+                  }
+                  onChange={(opt) => setMeasureUser(opt?.value ?? '')}
+                  placeholder={viewer ?? 'octocat'}
+                  isClearable
+                  formatCreateLabel={(v) => `Measure “${v}”`}
+                  formatOptionLabel={(opt) =>
+                    opt.__isNew__ ? (
+                      <span className="text-accent">{opt.label}</span>
+                    ) : (
+                      <span className="flex items-center gap-2">
+                        {opt.avatarUrl ? (
+                          <img src={opt.avatarUrl} alt="" className="h-5 w-5 rounded-full" />
+                        ) : (
+                          <span className="grid h-5 w-5 place-items-center rounded-full bg-white/10 text-[10px]">
+                            {opt.value[0]?.toUpperCase()}
+                          </span>
+                        )}
+                        {opt.label}
+                      </span>
+                    )
+                  }
+                  styles={userSelectStyles}
+                />
+              </div>
               {members.length > 0 && (
-                <p className="mt-1 font-sans text-[11px] normal-case text-white/30">
+                <p className="mt-1 font-sans text-[11px] normal-case tracking-normal text-white/30">
                   Pick from {members.length} org member{members.length > 1 ? 's' : ''} or type any login.
                 </p>
               )}
-            </label>
+            </div>
 
             <label className="text-xs font-medium uppercase tracking-wider text-white/45">
               Since
